@@ -26,6 +26,10 @@ func resourceVmQemu() *schema.Resource {
 		},
 
 		Schema: map[string]*schema.Schema{
+			"vmid": {
+				Type:     schema.TypeInt,
+				Optional: true,
+			},
 			"name": {
 				Type:     schema.TypeString,
 				Required: true,
@@ -344,12 +348,14 @@ func resourceVmQemuCreate(d *schema.ResourceData, meta interface{}) error {
 	pmParallelBegin(pconf)
 	client := pconf.Client
 	vmName := d.Get("name").(string)
+	vmID := d.Get("vmid").(int)
 	networks := d.Get("network").(*schema.Set)
 	qemuNetworks := devicesSetToMap(networks)
 	disks := d.Get("disk").(*schema.Set)
 	qemuDisks := devicesSetToMap(disks)
 
 	config := pxapi.ConfigQemu{
+		VmID:         vmID,
 		Name:         vmName,
 		Description:  d.Get("desc").(string),
 		Onboot:       d.Get("onboot").(bool),
@@ -377,9 +383,19 @@ func resourceVmQemuCreate(d *schema.ResourceData, meta interface{}) error {
 		QemuVlanTag:  d.Get("vlan").(int),
 		QemuMacAddr:  d.Get("mac").(string),
 	}
+	log.Printf("[DEBUG] VMID: %d", vmID)
+
+	if vmID != 0 {
+		log.Print("[DEBUG] checking for duplicate ID")
+		if exists, err := client.CheckVmID(vmID); exists {
+			log.Printf("[DEBUG] %s", err)
+			pmParallelEnd(pconf)
+			return err
+		}
+	}
+
 	log.Print("[DEBUG] checking for duplicate name")
 	dupVmr, _ := client.GetVmRefByName(vmName)
-
 	forceCreate := d.Get("force_create").(bool)
 	targetNode := d.Get("target_node").(string)
 
@@ -394,13 +410,17 @@ func resourceVmQemuCreate(d *schema.ResourceData, meta interface{}) error {
 	vmr := dupVmr
 
 	if vmr == nil {
-		// get unique id
-		nextid, err := nextVmId(pconf)
-		if err != nil {
-			pmParallelEnd(pconf)
-			return err
+		// get unique id if vmid is not set
+		if vmID == 0 {
+			nextid, err := nextVmId(pconf)
+			if err != nil {
+				pmParallelEnd(pconf)
+				return err
+			}
+			vmr = pxapi.NewVmRef(nextid)
+		} else {
+			vmr = pxapi.NewVmRef(vmID)
 		}
-		vmr = pxapi.NewVmRef(nextid)
 
 		vmr.SetNode(targetNode)
 		// check if ISO or clone
@@ -483,10 +503,15 @@ func resourceVmQemuUpdate(d *schema.ResourceData, meta interface{}) error {
 	pconf := meta.(*providerConfiguration)
 	pmParallelBegin(pconf)
 	client := pconf.Client
+	vmid := d.Get("vmid").(int)
+
 	_, _, vmID, err := parseResourceId(d.Id())
 	if err != nil {
 		pmParallelEnd(pconf)
 		return err
+	}
+	if vmid != 0 {
+		vmID = vmid
 	}
 	vmr := pxapi.NewVmRef(vmID)
 	_, err = client.GetVmInfo(vmr)
@@ -500,6 +525,8 @@ func resourceVmQemuUpdate(d *schema.ResourceData, meta interface{}) error {
 	qemuNetworks := devicesSetToMap(configNetworksSet)
 
 	config := pxapi.ConfigQemu{
+		VmID:         d.Get("vmid").(int),
+		Agent:        d.Get("agent").(string),
 		Name:         d.Get("name").(string),
 		Description:  d.Get("desc").(string),
 		Onboot:       d.Get("onboot").(bool),
