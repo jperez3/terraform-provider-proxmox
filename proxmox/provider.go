@@ -3,6 +3,7 @@ package proxmox
 import (
 	"crypto/tls"
 	"fmt"
+	"os"
 	"regexp"
 	"strconv"
 	"sync"
@@ -22,6 +23,20 @@ type providerConfiguration struct {
 
 // Provider - Terrafrom properties for proxmox
 func Provider() *schema.Provider {
+	pmOTPprompt := schema.Schema{
+		Type:        schema.TypeString,
+		Optional:    true,
+		DefaultFunc: schema.EnvDefaultFunc("PM_OTP", ""),
+		Description: "OTP 2FA code (if required)",
+	}
+	if os.Getenv("PM_OTP_PROMPT") == "1" {
+		pmOTPprompt = schema.Schema{
+			Type:        schema.TypeString,
+			Required:    true,
+			DefaultFunc: schema.EnvDefaultFunc("PM_OTP", nil),
+			Description: "OTP 2FA code (if required)",
+		}
+	}
 	return &schema.Provider{
 
 		Schema: map[string]*schema.Schema{
@@ -54,10 +69,12 @@ func Provider() *schema.Provider {
 				Optional: true,
 				Default:  false,
 			},
+			"pm_otp": &pmOTPprompt,
 		},
 
 		ResourcesMap: map[string]*schema.Resource{
 			"proxmox_vm_qemu": resourceVmQemu(),
+			"proxmox_lxc":     resourceLxc(),
 			// TODO - storage_iso
 			// TODO - bridge
 			// TODO - vm_qemu_template
@@ -68,7 +85,7 @@ func Provider() *schema.Provider {
 }
 
 func providerConfigure(d *schema.ResourceData) (interface{}, error) {
-	client, err := getClient(d.Get("pm_api_url").(string), d.Get("pm_user").(string), d.Get("pm_password").(string), d.Get("pm_tls_insecure").(bool))
+	client, err := getClient(d.Get("pm_api_url").(string), d.Get("pm_user").(string), d.Get("pm_password").(string), d.Get("pm_otp").(string), d.Get("pm_tls_insecure").(bool))
 	if err != nil {
 		return nil, err
 	}
@@ -83,13 +100,13 @@ func providerConfigure(d *schema.ResourceData) (interface{}, error) {
 	}, nil
 }
 
-func getClient(pm_api_url string, pm_user string, pm_password string, pm_tls_insecure bool) (*pxapi.Client, error) {
+func getClient(pm_api_url string, pm_user string, pm_password string, pm_otp string, pm_tls_insecure bool) (*pxapi.Client, error) {
 	tlsconf := &tls.Config{InsecureSkipVerify: true}
 	if !pm_tls_insecure {
 		tlsconf = nil
 	}
 	client, _ := pxapi.NewClient(pm_api_url, nil, tlsconf)
-	err := client.Login(pm_user, pm_password)
+	err := client.Login(pm_user, pm_password, pm_otp)
 	if err != nil {
 		return nil, err
 	}
@@ -130,10 +147,10 @@ func resourceId(targetNode string, resType string, vmId int) string {
 var rxRsId = regexp.MustCompile("([^/]+)/([^/]+)/(\\d+)")
 
 func parseResourceId(resId string) (targetNode string, resType string, vmId int, err error) {
-	idMatch := rxRsId.FindStringSubmatch(resId)
-	if idMatch == nil {
-		err = fmt.Errorf("Invalid resource id: %s", resId)
+	if !rxRsId.MatchString(resId) {
+		return "", "", -1, fmt.Errorf("Invalid resource format: %s. Must be node/type/vmId", resId)
 	}
+	idMatch := rxRsId.FindStringSubmatch(resId)
 	targetNode = idMatch[1]
 	resType = idMatch[2]
 	vmId, err = strconv.Atoi(idMatch[3])
